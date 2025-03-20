@@ -1,0 +1,594 @@
+import axios from 'axios';
+
+const API_BASE_URL = 'http://20.244.56.144/test';
+
+const apiClient = axios.create({
+  baseURL: API_BASE_URL,
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
+
+const cache = {
+  users: {
+    data: null,
+    timestamp: null,
+    expiryTime: 60000, // 1 minute
+  },
+  userPosts: {
+    // Will store posts by userId
+  },
+  postComments: {
+    // Will store comments by postId
+  }
+};
+
+const isCacheValid = (cacheObj) => {
+  if (!cacheObj.data || !cacheObj.timestamp) return false;
+  return Date.now() - cacheObj.timestamp < cacheObj.expiryTime;
+};
+
+export const fetchUsers = async () => {
+  if (isCacheValid(cache.users)) {
+    return cache.users.data;
+  }
+  
+  try {
+    const response = await apiClient.get('/users');
+    
+    // Transform the response to match our application's expected format
+    const usersData = response.data.users;
+    const formattedUsers = Object.entries(usersData).map(([id, name]) => ({
+      id: parseInt(id),
+      name,
+      username: name.toLowerCase().replace(/\s+/g, '.'),
+    }));
+    
+    cache.users.data = formattedUsers;
+    cache.users.timestamp = Date.now();
+    return formattedUsers;
+  } catch (error) {
+    console.error('Error fetching users:', error);
+    throw error;
+  }
+};
+
+export const fetchUserPosts = async (userId) => {
+  if (!cache.userPosts[userId]) {
+    cache.userPosts[userId] = {
+      data: null,
+      timestamp: null,
+      expiryTime: 30000, // 30 seconds
+    };
+  }
+  
+  if (isCacheValid(cache.userPosts[userId])) {
+    return cache.userPosts[userId].data;
+  }
+  
+  try {
+    const response = await apiClient.get(`/users/${userId}/posts`);
+    
+    // Format the posts data
+    const postsData = response.data.posts.map(post => ({
+      id: post.id,
+      userId: post.userid,
+      title: `Post #${post.id}`,
+      body: post.content,
+    }));
+    
+    cache.userPosts[userId].data = postsData;
+    cache.userPosts[userId].timestamp = Date.now();
+    return postsData;
+  } catch (error) {
+    console.error(`Error fetching posts for user ${userId}:`, error);
+    throw error;
+  }
+};
+
+// Fetch comments for a specific post with caching
+export const fetchPostComments = async (postId) => {
+  // Initialize cache for this post if it doesn't exist
+  if (!cache.postComments[postId]) {
+    cache.postComments[postId] = {
+      data: null,
+      timestamp: null,
+      expiryTime: 30000, // 30 seconds
+    };
+  }
+  
+  if (isCacheValid(cache.postComments[postId])) {
+    return cache.postComments[postId].data;
+  }
+  
+  try {
+    const response = await apiClient.get(`/posts/${postId}/comments`);
+    const commentsData = response.data.comments.map(comment => ({
+      id: comment.id,
+      postId: comment.postid,
+      body: comment.content,
+    }));
+    
+    cache.postComments[postId].data = commentsData;
+    cache.postComments[postId].timestamp = Date.now();
+    return commentsData;
+  } catch (error) {
+    console.error(`Error fetching comments for post ${postId}:`, error);
+    throw error;
+  }
+};
+
+cache.userPosts = {};
+cache.postComments = {};
+
+export const fetchAllPosts = async () => {
+  try {
+    const users = await fetchUsers();
+    
+    const postsPromises = users.map(user => fetchUserPosts(user.id));
+    const userPostsArrays = await Promise.all(postsPromises);
+    
+    const allPosts = userPostsArrays.flat();
+    
+    return allPosts;
+  } catch (error) {
+    console.error('Error fetching all posts:', error);
+    throw error;
+  }
+};
+export const fetchAllCommentCounts = async (postIds) => {
+  try {
+    // Fetch comments for each post in parallel
+    const commentsPromises = postIds.map(postId => fetchPostComments(postId));
+    const commentsArrays = await Promise.all(commentsPromises);
+    
+    // Create a map of post ID to comment count
+    const commentCountMap = {};
+    
+    postIds.forEach((postId, index) => {
+      commentCountMap[postId] = commentsArrays[index].length;
+    });
+    
+    return commentCountMap;
+  } catch (error) {
+    console.error('Error fetching comment counts:', error);
+    throw error;
+  }
+};
+
+import React, { useState, useEffect } from 'react';
+import { fetchUsers, fetchAllPosts } from '../api';
+
+const TopUsers = () => {
+  const [topUsers, setTopUsers] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+
+  useEffect(() => {
+    const getTopUsers = async () => {
+      try {
+        setLoading(true);
+        
+        // Get all users
+        const users = await fetchUsers();
+        
+        // Get all posts
+        const posts = await fetchAllPosts();
+        
+        // Create a map to count posts by user
+        const userPostCount = new Map();
+        
+        // Count posts for each user
+        posts.forEach(post => {
+          const userId = post.userId;
+          userPostCount.set(userId, (userPostCount.get(userId) || 0) + 1);
+        });
+        
+        // Add post count to each user
+        const usersWithCounts = users.map(user => ({
+          ...user,
+          postCount: userPostCount.get(user.id) || 0,
+          // Generate a random avatar for each user
+          avatar: `https://source.unsplash.com/random/100x100?profile=${user.id}`
+        }));
+        
+        // Sort by post count (descending) and take the top 5
+        const sortedUsers = usersWithCounts
+          .sort((a, b) => b.postCount - a.postCount)
+          .slice(0, 5);
+          
+        setTopUsers(sortedUsers);
+        setLoading(false);
+      } catch (err) {
+        setError('Failed to fetch top users. Please try again later.');
+        setLoading(false);
+        console.error('Error in getTopUsers:', err);
+      }
+    };
+    
+    getTopUsers();
+    
+    // Refresh data every minute
+    const interval = setInterval(() => {
+      getTopUsers();
+    }, 60000);
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded">
+        <p>{error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow-md p-6">
+      <h1 className="text-2xl font-bold mb-6 text-gray-800">Top 5 Most Active Users</h1>
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+        {topUsers.map((user, index) => (
+          <div key={user.id} className="bg-white rounded-lg shadow-md border border-gray-200 overflow-hidden hover:shadow-lg transition-shadow duration-300">
+            <div className={`h-2 ${index === 0 ? 'bg-yellow-400' : index === 1 ? 'bg-gray-400' : index === 2 ? 'bg-amber-600' : 'bg-blue-500'}`}></div>
+            <div className="p-4 flex items-center">
+              <img 
+                src={user.avatar} 
+                alt={`${user.name}'s avatar`} 
+                className="w-16 h-16 rounded-full object-cover mr-4 border-2 border-gray-200"
+              />
+              <div>
+                <h2 className="text-lg font-semibold text-gray-800">{user.name}</h2>
+                <p className="text-gray-500">@{user.username}</p>
+                <div className="flex items-center mt-2">
+                  <span className="bg-blue-100 text-blue-800 text-sm font-semibold px-3 py-1 rounded-full">
+                    {user.postCount} posts
+                  </span>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default TopUsers;
+
+// components/TrendingPosts.jsx
+import React, { useState, useEffect } from 'react';
+import { fetchAllPosts, fetchUsers, fetchAllCommentCounts } from '../api';
+
+const TrendingPosts = () => {
+  const [trendingPosts, setTrendingPosts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [userMap, setUserMap] = useState({});
+
+  useEffect(() => {
+    const getTrendingPosts = async () => {
+      try {
+        setLoading(true);
+        
+        // Get all users
+        const users = await fetchUsers();
+        
+        // Create a map of users by ID for quick lookup
+        const usersById = users.reduce((acc, user) => {
+          acc[user.id] = user;
+          return acc;
+        }, {});
+        
+        setUserMap(usersById);
+        
+        // Get all posts
+        const posts = await fetchAllPosts();
+        
+        // Get comment counts for all posts
+        const postIds = posts.map(post => post.id);
+        const commentCounts = await fetchAllCommentCounts(postIds);
+        
+        // Find the maximum comment count
+        let maxComments = 0;
+        Object.values(commentCounts).forEach(count => {
+          if (count > maxComments) {
+            maxComments = count;
+          }
+        });
+        
+        // Filter posts with the maximum comment count
+        const postsWithMaxComments = posts.filter(post => 
+          commentCounts[post.id] === maxComments
+        );
+        
+        // Add comment count and random image to each post
+        const enrichedPosts = postsWithMaxComments.map(post => ({
+          ...post,
+          commentCount: maxComments,
+          image: `https://source.unsplash.com/random/800x400?post=${post.id}`
+        }));
+        
+        setTrendingPosts(enrichedPosts);
+        setLoading(false);
+      } catch (err) {
+        setError('Failed to fetch trending posts. Please try again later.');
+        setLoading(false);
+        console.error('Error in getTrendingPosts:', err);
+      }
+    };
+    
+    getTrendingPosts();
+    
+    // Refresh data every 30 seconds
+    const interval = setInterval(() => {
+      getTrendingPosts();
+    }, 30000);
+    
+    return () => clearInterval(interval);
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  if (error) {
+    return (
+      <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded">
+        <p>{error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-white rounded-lg shadow-md p-6">
+      <h1 className="text-2xl font-bold mb-6 text-gray-800">Trending Posts</h1>
+      <p className="text-gray-600 mb-6">Posts with the highest number of comments ({trendingPosts.length > 0 ? trendingPosts[0].commentCount : 0})</p>
+      
+      <div className="grid grid-cols-1 gap-6">
+        {trendingPosts.map(post => (
+          <div key={post.id} className="bg-white rounded-lg shadow-lg overflow-hidden border border-gray-200">
+            <div className="relative">
+              <img 
+                src={post.image} 
+                alt={`Post by ${userMap[post.userId]?.name || 'Unknown User'}`} 
+                className="w-full h-64 object-cover"
+              />
+              <div className="absolute top-4 right-4 bg-red-500 text-white font-bold rounded-full px-3 py-1 text-sm flex items-center shadow-lg">
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                </svg>
+                {post.commentCount}
+              </div>
+            </div>
+            
+            <div className="p-6">
+              <div className="flex items-center mb-4">
+                <img 
+                  src={`https://source.unsplash.com/random/100x100?profile=${post.userId}`}
+                  alt="User avatar" 
+                  className="w-10 h-10 rounded-full mr-4 object-cover"
+                />
+                <div>
+                  <p className="font-semibold text-gray-800">{userMap[post.userId]?.name || 'Unknown User'}</p>
+                  <p className="text-gray-500 text-sm">@{userMap[post.userId]?.username || 'unknown'}</p>
+                </div>
+              </div>
+              
+              <h2 className="text-xl font-bold text-gray-800 mb-2">{post.title}</h2>
+              <p className="text-gray-600 mb-4">{post.body}</p>
+              
+              <div className="border-t border-gray-200 pt-4 mt-4">
+                <div className="flex justify-between items-center">
+                  <div className="flex space-x-4">
+                    <button className="text-gray-500 flex items-center hover:text-blue-500 transition">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                      </svg>
+                      Like
+                    </button>
+                    <button className="text-gray-500 flex items-center hover:text-blue-500 transition">
+                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                      </svg>
+                      Comment
+                    </button>
+                  </div>
+                  <button className="text-gray-500 flex items-center hover:text-blue-500 transition">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                    </svg>
+                    Share
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default TrendingPosts;
+
+// components/Feed.jsx
+import React, { useState, useEffect, useRef } from 'react';
+import { fetchAllPosts, fetchUsers } from '../api';
+
+const Feed = () => {
+  const [posts, setPosts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
+  const [userMap, setUserMap] = useState({});
+  const pollingIntervalRef = useRef(null);
+
+  useEffect(() => {
+    const loadFeed = async () => {
+      try {
+        setLoading(true);
+        
+        // Get all users
+        const users = await fetchUsers();
+        
+        // Create a map of users by ID for quick lookup
+        const usersById = users.reduce((acc, user) => {
+          acc[user.id] = user;
+          return acc;
+        }, {});
+        
+        setUserMap(usersById);
+        
+        // Get all posts
+        const posts = await fetchAllPosts();
+        
+        // Add timestamp and random image to each post
+        const enrichedPosts = posts.map(post => ({
+          ...post,
+          timestamp: new Date().getTime() - Math.floor(Math.random() * 86400000), // Random time within last 24 hours
+          image: `https://source.unsplash.com/random/800x400?post=${post.id}`
+        }));
+        
+        // Sort by timestamp (newest first)
+        const sortedPosts = enrichedPosts.sort((a, b) => b.timestamp - a.timestamp);
+        
+        setPosts(sortedPosts);
+        setLoading(false);
+      } catch (err) {
+        setError('Failed to load feed. Please try again later.');
+        setLoading(false);
+        console.error('Error in loadFeed:', err);
+      }
+    };
+    
+    // Initial load
+    loadFeed();
+    
+    // Set up polling for real-time updates
+    pollingIntervalRef.current = setInterval(() => {
+      loadFeed();
+    }, 10000); // Poll every 10 seconds
+    
+    // Cleanup interval on component unmount
+    return () => {
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+      }
+    };
+  }, []);
+
+  // Format timestamp to readable format
+  const formatTimestamp = (timestamp) => {
+    const now = new Date().getTime();
+    const diff = now - timestamp;
+    
+    // Convert diff to minutes, hours, etc.
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    
+    if (minutes < 60) {
+      return `${minutes} min${minutes !== 1 ? 's' : ''} ago`;
+    } else if (hours < 24) {
+      return `${hours} hour${hours !== 1 ? 's' : ''} ago`;
+    } else {
+      return new Date(timestamp).toLocaleDateString();
+    }
+  };
+
+  if (loading && posts.length === 0) {
+    return (
+      <div className="flex justify-center items-center h-64">
+        <div className="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-blue-500"></div>
+      </div>
+    );
+  }
+
+  if (error && posts.length === 0) {
+    return (
+      <div className="bg-red-100 border-l-4 border-red-500 text-red-700 p-4 rounded">
+        <p>{error}</p>
+      </div>
+    );
+  }
+
+  return (
+    <div>
+      <h1 className="text-2xl font-bold mb-6 text-gray-800">Feed</h1>
+      
+      {loading && (
+        <div className="flex justify-center my-4">
+          <div className="animate-spin rounded-full h-6 w-6 border-t-2 border-b-2 border-blue-500"></div>
+        </div>
+      )}
+      
+      <div className="space-y-6">
+        {posts.map(post => (
+          <div key={post.id} className="bg-white rounded-lg shadow-md overflow-hidden border border-gray-200">
+            <div className="p-4 flex items-center">
+              <img 
+                src={`https://source.unsplash.com/random/100x100?profile=${post.userId}`}
+                alt="User avatar" 
+                className="w-10 h-10 rounded-full mr-4 object-cover"
+              />
+              <div className="flex-1">
+                <p className="font-semibold text-gray-800">{userMap[post.userId]?.name || 'Unknown User'}</p>
+                <p className="text-gray-500 text-sm">@{userMap[post.userId]?.username || 'unknown'}</p>
+              </div>
+              <span className="text-gray-400 text-sm">{formatTimestamp(post.timestamp)}</span>
+            </div>
+            
+            <img 
+              src={post.image} 
+              alt={`Post by ${userMap[post.userId]?.name || 'Unknown User'}`} 
+              className="w-full h-64 object-cover"
+            />
+            
+            <div className="p-4">
+              <h2 className="text-xl font-semibold text-gray-800 mb-2">{post.title}</h2>
+              <p className="text-gray-600">{post.body}</p>
+            </div>
+            
+            <div className="border-t border-gray-200 px-4 py-3">
+              <div className="flex justify-between items-center">
+                <div className="flex space-x-4">
+                  <button className="text-gray-500 flex items-center hover:text-blue-500 transition">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4.318 6.318a4.5 4.5 0 000 6.364L12 20.364l7.682-7.682a4.5 4.5 0 00-6.364-6.364L12 7.636l-1.318-1.318a4.5 4.5 0 00-6.364 0z" />
+                    </svg>
+                    Like
+                  </button>
+                  <button className="text-gray-500 flex items-center hover:text-blue-500 transition">
+                    <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z" />
+                    </svg>
+                    Comment
+                  </button>
+                </div>
+                <button className="text-gray-500 flex items-center hover:text-blue-500 transition">
+                  <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 mr-1" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8.684 13.342C8.886 12.938 9 12.482 9 12c0-.482-.114-.938-.316-1.342m0 2.684a3 3 0 110-2.684m0 2.684l6.632 3.316m-6.632-6l6.632-3.316m0 0a3 3 0 105.367-2.684 3 3 0 00-5.367 2.684zm0 9.316a3 3 0 105.368 2.684 3 3 0 00-5.368-2.684z" />
+                  </svg>
+                  Share
+                </button>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default Feed;
